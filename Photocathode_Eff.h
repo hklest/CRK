@@ -5,7 +5,8 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>    // std::lower_bound, std::upper_bound, std::sort                                                                                                                                   
-#include <vector>       // std::vector                                                                                                                                                                      
+#include <vector>       // std::vector
+#include <string>
 
 
 // PhotoCathode_Eff takes a CSV "PhotocathodeEff.txt" (as produced by DataThief) and produces the quantum efficiency of a photocathode (Default CsI) at a specific wavelength in nm. This is accomplished by splitting the columns of the CSV into two vectors, one containing efficiences (CsIEffs) and one containing wavelengths (CsILambdas). The indices of the vectors have a one-to-one correspondence, so finding the index of the nearest wavelength to the one entered produces also the index of the closest efficiency.                    
@@ -18,10 +19,30 @@ public:
   Photocathode_Eff(double lambda) {}
   virtual ~Photocathode_Eff() {}
 
+  double lambda_min, lambda_max;
+  bool do_CsI = true;
+  bool do_LAPPD = false;
+  bool do_H12700A = false;
+  string PC;
+  // Options are LAPPD_Eff.txt, CsI_Eff.txt, H12700A.txt others TBD ...
+  // Due to difference in wavelength coverage for the various options, the time the simulation takes can vary.
+
   // This efficiency has a wavelength dependence
   double e(double lambda)
   {
-
+    if (do_H12700A)
+      {
+	PC = "H12700A_Eff.txt";
+      }
+    if(do_LAPPD)
+      {
+	PC = "LAPPD_Eff.txt";
+      }
+    if(do_CsI)
+      {
+	PC = "CsI_Eff.txt";
+      }
+   
     ifstream inFile;
     double eff;
     vector<double> Holder; //Vector for holding values from DataThief CSV                                                                                                                                   
@@ -33,7 +54,7 @@ public:
     int i = 0; // ints for looping over                                                                                                                                                                     
     int j = 0;
 
-    inFile.open("CsI_Eff.txt"); // Open DataThief CSV                                                                                                                                                     
+    inFile.open(PC.c_str()); // Open DataThief CSV, Options are LAPPD_Eff.txt, CsI_Eff.txt, H12700A.txt others TBD ...                                                                                                                                                     
     if (!inFile)
       {
         cerr << "End of File or Unable to open file";
@@ -114,6 +135,60 @@ public:
     inFile.close(); //close io stream                                                                                                                                                                       
     return eff*.01; // return efficiency in decimal form, e.g .876             
   }
+
+
+  string PCName()
+  {
+    string PCn;
+    if (do_H12700A)
+      {
+	PCn = "H12700A";
+      }
+    if(do_LAPPD)
+      {
+	PCn = "LAPPD";
+      }
+    if(do_CsI)
+      {
+	PCn = "CsI GEM";
+      }
+    return PCn;
+  }
+ double LMin()
+  {
+    if (do_H12700A)
+      {
+	lambda_min = 200;
+      }
+    if(do_LAPPD)
+      {
+	lambda_min = 90;
+      }
+    if(do_CsI)
+      {
+	lambda_min = 60;
+      }
+    return lambda_min;
+  }
+ double LMax()
+  {
+    if (do_H12700A)
+      {
+	lambda_max = 650;
+      }
+    if(do_LAPPD)
+      {
+	lambda_max = 630;
+      }
+    if(do_CsI)
+      {
+	lambda_max = 200;
+      }
+    return lambda_max;
+  }
+
+
+  
 
 protected:
   double eff;

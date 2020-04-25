@@ -9,7 +9,7 @@ public:
   CONSTANT_Index(double N) {index = N;}
   virtual ~CONSTANT_Index() {}
 
-  // Index of refraction at all wavelengths
+  // This efficiency has no wavelength dependence
   double n(double lambda) {return index;}
 
 protected:
