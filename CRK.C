@@ -1,0 +1,568 @@
+#include "Index.h"
+#include "Eff.h"
+#include "Smear.h"
+#include "CRK.h"
+#include "Sellmeier_Index.h"
+#include "Photocathode_Eff.h"
+#include "Efftextfile.h"
+#include <cmath>
+#include <ctime>
+#include "TFile.h"
+#include <cstdlib>
+#include "Functions.h"
+using namespace std;
+
+void CRK::Simulate_Momentum() //Simulate_Something provides outputs of efficiencies, theta_c, Npe, etc.
+{
+  //Input Parameters
+  r_in = 50;
+  r_out = 70;
+  L = r_out-r_in;
+  //  rapidity = 0;
+  B = 1.5; // magnetic field in Tesla
+  pixel_size = .1; // in cm
+  PMax = 40; // Maximum momentum in MC in GeV 
+  PMin = 0;  // Minimum momentum in MC                                                                                                                                                             
+  NP = 80; // number of P points along x-axis
+  Calpha = 0; // Error in Alpha (in radians)
+  ThetaCMax = .14; // Max of y-axis in plot
+  NpMC = 5000; // Number of times to run Monte Carlo
+  
+  double Pincrement = PMax/NP;
+  
+  //
+  bool do_stray_photons = true; 
+  bool do_NvsWL = false; 
+  long double time_resolution = 1/10000000000.0; // seconds
+  cout << "time res is " << time_resolution << endl;
+  double dark_rate = 100000; // hz/mm^2
+  double array_size = 64; // assuming square, one side in mm, saturated ring diameter O(32 mm), if 288 segments then 1.18m^2 of SiPM needed
+  
+  double MeanStrayPhotons = .01;
+  //
+
+   AssignWLMinMax();
+   lambdamin = 300; // Hardcoded cutoffs
+   lambdamax = 1000;
+   double lambdaref = 400;
+   double ThCMax = acos(1/(n->n(lambdaref)));	   
+   stepsize = 1; // step size for numerical integration 
+
+
+  
+  // Histograms
+  
+  ThetaCvsP = new TH2D("ThetaCvsP","ThetaC vs. P",NP,0.0,PMax,500,0,ThetaCMax);
+  pi_ka_vsP = new TH2D("pi_ka_vsP","N Sigma Pi-Ka vs. P",5*NP,0.0,PMax,6000,.5,100);
+  ka_pr_vsP = new TH2D("ka_pr_vsP","N Sigma Ka-Pr vs. P",5*NP,0.0,PMax,6000,.5,100);
+  e_pi_vsP = new TH2D("e_pi_vsP","N Sigma e-Pi vs. P",5*NP,0.0,PMax,6000,.5,100);
+  e_pi_vsP = new TH2D("e_pi_vsP","N Sigma e-Pi vs. P",5*NP,0.0,PMax,6000,.5,100);
+  TH1D *NStrays = new TH1D("NStrays","Number Stray Photons",10,0,10);
+  TH1D *MassReco = new TH1D("MassReco","Reconstructed Masses",1000,0,2);
+  double massrecop = 15;
+  TH2D *StrayLocations = new TH2D("StrayLocations","Stray Locations in X and Y",10*array_size,-array_size,array_size,10*array_size,-array_size,array_size);
+  TH2D *AllLocations = new TH2D("AllLocations","All Locations in X and Y",8*array_size,-array_size/2,array_size/2,8*array_size,-array_size/2,array_size/2);
+  TH2D *SmearLocations = new TH2D("SmearLocations","Smears in X and Y",8*array_size,.05,.1,8*array_size,-.1,.1);
+  //
+  
+  
+  // Print Max and Min Wavelengths for each Efficiency
+  //   for(int i = 0; i < effs.size();i++)
+  // {
+  //   cout << "Eff " << i + 1<< "LMin is " << effs[i]->LMin() << endl;
+  //  cout << "Eff " << i + 1<< "LMax is " << effs[i]->LMax() << endl;
+  // }
+   
+   
+   // initialize integration parameters
+   cout << "lambdamin is " << lambdamin << endl;
+   cout << "lambdamax is " << lambdamax << endl;
+   if(do_NvsWL)
+     {
+       NvsWL = new TH1D("NvsWL","Wavelengths",1000,lambdamin,lambdamax);  
+     }
+   // Particle Masses
+   double mPi = 0.13957; // GeV                                                                                                                                                                         
+   double mKa = 0.49368;                                                                                                                                                                                
+   double mPr = 0.93827;                                                                                                                                                                                
+   double me = .0005110;
+
+   //   if(rapidity != 0)
+   // {
+   //   double z_length = 150; // length in Z of one half of the detector 
+   //   L = (r_out-r_in)/cos(2*atan2(exp(-rapidity),1)-M_PI/2);
+   //   cout << "Length of radiator at rapidity: " << rapidity << " is " << L << " cm " << endl;
+   // }
+   
+   // ThetaC Parameters
+   double PID [4] = {mPi, mKa, mPr, me};
+   string PIDname [4] = {"Pion","Kaon","Proton","Electron"};
+   double pi_mean = 0 , ka_mean = 0, pr_mean = 0, e_mean = 0, pi_RMS = 0, ka_RMS = 0, pr_RMS = 0, e_RMS = 0;
+   for (double p = PMin; p <= PMax; p = p+Pincrement)
+     {
+       for (int k = 0; k <= 3; k++) // edit loop to select for subsets of particles
+	 {
+	   p_m = p/PID[k];
+	   beta = sqrt(p_m*p_m/(1 + p_m*p_m));
+	   //cout << PIDname[k] << " threshold is " << beta/(n->n(lambdaref)) << endl; 
+	   //  cout << "lambdaref is " << lambdaref << " n at lref is " << n->n(lambdaref) << endl;  
+	   //Procedure for skipping if below cherenkov threshold, saves time
+	   double ThCPrelim = acos(1/((n->n(lambdaref))*beta)); // check if below cherenkov threshold
+	   cout << PIDname [k] << " Preliminary ThetaC is " << ThCPrelim << " at index of " << n->n(lambdaref) << endl;
+	   if(isnan(ThCPrelim))
+	     {
+	       continue;
+	     }
+	   //
+	   
+	   Normalize(); // These functions can be found in Functions.h
+	   dNdxIntegral = dNdx();
+	   ProduceEffDist();	 
+	   avgthetac = AverageThetaC(beta,Eff_Dist,Lambdas);
+	   cout << "avgthetac is " << avgthetac << endl;
+	   AlphaEM = 1/137.035999;
+	   dNdxValue = 2*M_PI*AlphaEM*pow(sin(avgthetac),2)*dNdxIntegral; // number of photons produced AND measured per unit length
+	   Npe = dNdxValue*L*10000000; // large number is there to convert from nm to cm;
+	   Npe = Npe*.7;
+	   cout << "Npe = " << Npe << endl;
+	   
+	   //RNG for Monte Carlo
+	   seed = std::chrono::system_clock::now().time_since_epoch().count();
+	   std::default_random_engine PoisGen (seed);
+	   std::poisson_distribution<int> Poisson(Npe);
+	   seed2 = std::chrono::system_clock::now().time_since_epoch().count();
+	   std::default_random_engine PoisGen2 (seed2);
+	   
+	   TRandom3 Randy;
+	   
+	   seed3 = std::chrono::system_clock::now().time_since_epoch().count(); //Set a seed for the RNG so new numbers generated each time 
+	   std::default_random_engine LambdaGen3 (seed3);  // Initialize RNG
+	   std::discrete_distribution<int> LambdaDist3(Eff_Dist.begin(), Eff_Dist.end()); // returns an integer number with probabilities defined by the Eff_Dist vector, used in finding avgth
+	   seed4 = std::chrono::system_clock::now().time_since_epoch().count(); //Set a seed for the RNG so new numbers generated each time 
+	   
+	   //if (do_stray_photons)
+	   //  {
+	       std::default_random_engine strayxgen (seed4);  // Initialize RNG
+	       std::uniform_real_distribution<double> strayxdist(-1, 1); 
+	       seed5 = std::chrono::system_clock::now().time_since_epoch().count(); //Set a seed for the RNG so new numbers generated each time 
+	       std::default_random_engine strayygen (seed5);  // Initialize RNG
+	       std::uniform_real_distribution<double> strayydist(-1, 1); 
+	       // }
+	   // Momentum Monte Carlo
+
+
+	   
+	   cout << "Running Momentum Monte Carlo for " << PIDname[k] << " at " << p << " GeV" << endl;		 
+	   
+	   meanThC = 0;
+	   sigmaThC = 0;
+	   
+	   avgphotons = 0;
+	   int i = 0;
+	   
+	   while(i<=NpMC)
+	    {
+	      int photons = Poisson(PoisGen);
+	      // cout << "Photons = " << photons << endl;
+	      avgphotons += photons;
+	      //  cout << "N photons is " << photons << endl;
+	      double sum = 0;
+	      double sumsigma = 0;
+	      NStrayPhotons = 0;
+	      double photongen = Randy.Rndm();
+	      //cout << "photongen is " << photongen << endl;
+	      //int exp = 1;
+	      //cout << "dark probability is " <<  pow((dark_rate*pow(array_size,2))/(1/(4*time_resolution)),exp) << endl;
+	      //if(pow((dark_rate*pow(array_size,2))/(1/(4*time_resolution)),exp)>1)
+	      //	{
+	      std::poisson_distribution<int> PoissonStray(dark_rate*pow(array_size,2)*(4*time_resolution));
+		NStrayPhotons = PoissonStray(PoisGen2);
+		//	cout << "NStrayPhotons is " << NStrayPhotons << endl;
+		//}
+	      // while (photongen < pow(dark_rate*pow(array_size,2)/(1/(4*time_resolution)),exp))
+	      //	{
+	      //  NStrayPhotons++;
+	      //  exp++;
+	      //	}
+	      NStrays->Fill(NStrayPhotons);
+	      //
+	      //cout << "NStrayPhotons is " << NStrayPhotons << endl;
+	      // photons = photons + NStrayPhotons;
+	      for (int f=0; f<photons; f++)
+		{
+		  
+		  int WLindex = LambdaDist3(LambdaGen3);
+		  double WL = Lambdas[WLindex];
+		  if(do_NvsWL){NvsWL->Fill(WL);}
+		  double ThetaC = acos(1/((n->n(WL))*beta));
+		  double ringphi = 2*TMath::Pi()*Randy.Rndm();
+		  ThCreco = acos(sin(Calpha)*sin(ThetaC)*cos(ringphi) + cos(Calpha)*cos(ThetaC));
+		  double ThCsmeared,xSmeared,ySmeared,TotalSmear;
+		  ThCsmeared = ThCreco;
+		  //cout << "Initial ThCSmeared is " << ThCsmeared << endl;
+		  ThCsmeared = ThCsmeared + Randy.Gaus(0,pixel_size/(sqrt(12)*L)); // smear due to pixels
+		  // cout << "gaussian smear from pixel size" << Randy.Gaus(0,pixel_size/L) << endl;
+		  // cout << "First ThCSmeared is " << ThCsmeared << endl;
+		  ThCsmeared = smears[0]->smr(ThCsmeared,WL,p,B,r_in,r_out,ringphi,rapidity); //Additional smear
+		  //cout << "Second ThCSmeared is " << ThCsmeared << endl;
+		  // SmearedLocations->Fill(smears[1]->smr(ThCsmeared,WL,p,B,r_in,r_out,ringphi);
+		  //ThCsmeared = smears[1]->smr(ThCsmeared,WL,p,B,r_in,r_out,ringphi,rapidity); // uniform bending smear
+		  // cout << "Third ThCSmeared is " << ThCsmeared << endl;
+		  // for(i=0;i<smears.size();i++)
+		  //   {
+		  //    ThCsmeared = (smears[i]->smr(ThCsmeared,WL));
+		  //    return;
+		  //  }
+		  // cout << "thetac smeared is " << ThCsmeared << endl;
+		  sum += ThCsmeared;
+		  SmearLocations->Fill(ThCreco,ThCsmeared-ThCreco);
+		  AllLocations->Fill(10*L*ThCsmeared*cos(ringphi),10*L*ThCsmeared*sin(ringphi));
+		  sumsigma += pow(abs(avgthetac-ThCsmeared),2); // is avgthetac the right thing to use here?
+		  //cout << "sigma is " << pow(abs(avgthetac-ThCsmeared),2) << endl;
+		}
+	      if (photons > 0)
+		{
+		  sumstraythetas=0;
+		  sumstraysigmas=0;
+		  if(do_stray_photons)
+		    {
+		      int j=0;
+		      while(j<NStrayPhotons)
+			{
+			  
+			  double strayX = array_size*(strayxdist(strayxgen));
+			  double strayY = array_size*(strayydist(strayygen));
+			  double strayTheta = sqrt(pow(strayX,2)+pow(strayY,2))/(10*L);
+			  if (strayTheta < 1.2*ThCMax) // approximate some kind of likelihood/bkg rejection
+			    {
+			      sumstraythetas += strayTheta;
+			      //     cout << "straytheta is " << strayTheta << endl;
+			      sumstraysigmas += pow(abs(avgthetac-strayTheta),2);
+			      //cout << "strayX is " << strayX << " strayY is " << strayY << endl;
+			      StrayLocations->Fill(strayX,strayY);
+			      j++;
+			      // avgphotons++;
+			    }
+			  else
+			    {
+			      continue;
+			    }
+			}
+		      
+		      if(NStrayPhotons > 0 && do_stray_photons)
+			{
+			  //cout << "pow(sumstraysigmas/NStrayPhotons,.5) is " << pow(sumstraysigmas/NStrayPhotons,.5) << endl;
+			  sigmaThC += pow(sumstraysigmas/NStrayPhotons,.5);
+			}
+		    }
+		  double thetaApparent;
+		  if(do_stray_photons)
+		    {
+		      thetaApparent = (sum+sumstraythetas)/((double)photons+NStrayPhotons);// adding in scintillation photons distributed randomly, if do_stray_photons is false, sumstray,nscint=0
+		    }
+		  else
+		    {
+		      thetaApparent = (sum)/((double)photons);
+		    }
+		      sigmaThC += pow(sumsigma/photons,.5); //sum and divide by N outside photons loop to find mean sigma at a certain P
+		  //cout << "SigmaThC = " << sigmaThC << endl;
+		  meanThC += thetaApparent; // sum and divide by N at the end to find mean apparent theta at a P
+		  //cout << "MeanThC = " << meanThC << endl;
+		  //cout << "thetaApparent is " << thetaApparent << endl;
+		  ThetaCvsP->Fill(p,thetaApparent);
+		  if(p == massrecop)
+		    {
+		      MassReco->Fill(p*sqrt(pow(n->n(lambdaref),2)*pow(cos(thetaApparent),2)-1));
+		    }
+		  i++;
+		}
+	      
+	    }
+	  AssignPIDMomentum(k,p);   
+	 }
+    }
+  
+  // Extract information for graphic
+  string PCName = effs[0]->EffName();
+  cout << effs[0]->EffName() << endl;
+  Sellmeier_Index SMn(lambda);
+  string GasName = SMn.Gas();
+  pressure = SMn.SMpressure();
+  cout << "inner radius is " << r_in << endl;
+  cout << "outer radius is " << r_out << endl;
+  cout << "Radiator length is " << L << endl;
+  cout << "Gas is " << GasName << endl;
+  cout << "Pressure is " << pressure << " bar (absolute)" << endl;
+  cout << "B-field is " << B << endl;
+  double time_res_ps = time_resolution*1000000000000;
+  cout << "time_res_ps is " << time_res_ps << endl;
+  
+  //
+ 
+  //MomentumMCPlots();
+  //Plot
+  gStyle->SetOptStat(0);
+  TCanvas *momenta = new TCanvas("momenta","ThetaC vs. P",100,300,800,800);
+  //c1->Divide(1,2);                                                                                                                                                                                        
+  
+  ThetaCvsP->Draw("colz");
+  momenta->Modified();
+  momenta->Update();
+  
+  TCanvas *sigmasP = new TCanvas("sigmasP", "Sigmas",400,100,1300,800);
+  
+  pi_ka_vsP->SetMarkerStyle(kPlus);
+  ka_pr_vsP->SetMarkerStyle(kPlus);
+  e_pi_vsP->SetMarkerStyle(kPlus);
+  sigmasP->Divide(3,1);
+  sigmasP->cd(1);
+
+  gPad->SetLogy(1);
+  pi_ka_vsP->Draw("PLC PMC"); 
+  TLine *l1p=new TLine(0,3.0,PMax,3.0);
+  l1p->SetLineColor(kBlue);
+  l1p->Draw();
+  TPaveText *pt = new TPaveText(0.15,0.7,0.87,0.85,"NDC");
+  pt->SetTextSize(0.03);
+  pt->SetFillColor(0);
+  pt->SetTextAlign(12);
+  pt->AddText(Form("Gas is %s, Alpha is %g rad",GasName.c_str(),Calpha));
+  pt->AddText(Form("Photocathode efficiency from %s",PCName.c_str()));
+  pt->AddText(Form("Radiator length is %g cm",L));
+  pt->AddText(Form("Detector inner radius is %g cm, outer radius is %g cm",r_in,r_out));
+  pt->AddText(Form("B-field is %g T",B));
+  pt->AddText(Form("Pixel size is %g x %g",pixel_size,pixel_size));
+  pt->AddText(Form("Pressure %g Bar absolute",pressure));
+  pt->AddText(Form("Time Resolution is %g ps",time_res_ps));
+  pt->AddText(Form("Dark Rate is %g Hz",dark_rate));
+  // pt->AddText(Form("Lambdamin is %g nm ",lambdamin));                                                                                                                                                
+  // pt->AddText(Form("Lambdamax is %g nm ",lambdamax));                                                                                                                                                
+  // pt->AddText(Form("Theta_C smear is %g",smears[3]->smr(1)));                                                                                                                                        
+  // pt->AddText(Form("Number of stray photons is %d",NScintPhotons));                                                                                                                                  
+  if(floor(Npe)==Npe)
+    {
+      pt->AddText(Form("Npe is forced to %g",Npe));
+    }
+  pt->Draw();
+  //pi_ka_vsP->GetXaxis()->SetLabelSize(5.2323);	\
+  
+  // pi_ka_vsP->GetXaxis()->SetTitle("GeV");	\
+  
+  // pi_ka_vsP->GetXaxis()->SetTitleOffset(1);	\
+  
+  // pi_ka_vsP->GetYaxis()->SetTitle("Number of Sigma");	\
+  
+  // pi_ka_vsP->GetYaxis()->SetTitleSize(80);	\
+  
+  
+  
+  sigmasP->cd(2);
+  gPad->SetLogy(1);
+  ka_pr_vsP->Draw("PLC PMC");
+  sigmasP->Modified();
+  sigmasP->Update();
+  TLine *l2p=new TLine(0,3.0,PMax,3.0);
+  l2p->SetLineColor(kBlue);
+  l2p->Draw();
+  
+  sigmasP->cd(3);
+  gPad->SetLogy(1);
+  e_pi_vsP->Draw("PLC PMC");
+  sigmasP->Modified();
+  sigmasP->Update();
+  TLine *l3p=new TLine(0,3.0,PMax,3.0);
+  l3p->SetLineColor(kBlue);
+  l3p->Draw();
+  //
+  SimResults = new TFile("SimResults.root", "recreate");
+  SimResults->cd();
+  ka_pr_vsP->Write();
+  e_pi_vsP->Write();
+  pi_ka_vsP->Write();
+  ThetaCvsP->Write();
+  MassReco->Write();
+  NStrays->Write();
+  StrayLocations->Write();
+  AllLocations->Write();
+  SmearLocations->Write();
+  SimResults->Close();
+  
+  if(do_NvsWL){NvsWL->Draw();}
+  //
+  
+}
+
+void CRK::Simulate_Alpha() //Simulate_Something provides outputs of efficiencies, theta_c, Npe, etc.
+{
+  //Alpha MC Parameters
+  double r_in = 50;
+  double r_out = 75;
+  double B = 1.5; 
+  AlphaMax = 0.010; // radians
+  NAlpha = 10; // number of alpha points along x-axis
+  p = 33; // Momentum value where the alpha MC is run at
+  NAlphaMC = 1000; // number of points in MC
+  //
+
+  // Whether or not to add in background
+  bool do_stray_photons = true;
+  double MeanStrayPhotons = .1;
+  //
+  
+  //Histograms
+  ThetaCMax = .06;
+  pi_ka_vsAlpha = new TH2D("N Sigma Pi-Ka vs. Alpha","N Sigma Pi-Ka vs. Alpha",NAlpha,0.0,AlphaMax,1000,.5,50);
+  ka_pr_vsAlpha = new TH2D("N Sigma Ka-Pr vs. Alpha","N Sigma Ka-Pr vs. Alpha",NAlpha,0.0,AlphaMax,1000,.5,50);
+  e_pi_vsAlpha = new TH2D("N Sigma e-Pi vs. Alpha","N Sigma e-Pi vs. Alpha",NAlpha,0.0,AlphaMax,1000,.5,50);
+  ThetaCvsAlpha = new TH2D("ThetaCvAlpha","ThetaC vs. Alpha",NAlpha,0.0,AlphaMax,1000,0,ThetaCMax);
+  //
+
+  //Determine Max and Min wavelengths to consider
+  for(int i = 0; i < effs.size();i++)
+    {
+      cout << "Eff " << i + 1<< "LMin is " << effs[i]->LMin() << endl;
+      cout << "Eff " << i + 1<< "LMax is " << effs[i]->LMax() << endl;
+    }
+  AssignWLMinMax();
+  //
+  // initialize integration parameters
+  stepsize = 1; // step size for numerical integration 
+  cout << "lambdamin is " << lambdamin << endl;
+  cout << "lambdamax is " << lambdamax << endl;
+  //
+  
+  // Particle Masses
+  double mPi = 0.13957; // GeV                                                                                                                                                                         
+  double mKa = 0.49368;                                                                                                                                                                                
+  double mPr = 0.93827;                                                                                                                                                                                
+  double me = .0005110;
+  
+  // ThetaC Parameters
+  double PID [4] = {mPi, mKa, mPr, me};
+  string PIDname [4] = {"Pion","Kaon","Proton","Electron"};
+  double pi_mean = 0 , ka_mean = 0, pr_mean = 0, e_mean = 0, pi_RMS = 0, ka_RMS = 0, pr_RMS = 0, e_RMS = 0;
+  for (int k = 0; k <= 3; k++) // edit loop to select for subsets of particles
+    {
+      p_m = p/PID[k];
+      beta = sqrt(p_m*p_m/(1 + p_m*p_m));
+      
+      //Procedure for skipping if below cherenkov threshold, saves time
+      double ThCPrelim = acos(1/(n->n((lambdamin+lambdamax)/2)*beta)); // check if below cherenkov threshold
+      cout << PIDname [k] << "Preliminary ThetaC is " << ThCPrelim << endl;
+      if(isnan(ThCPrelim))
+	{
+	  continue;
+	}
+      //
+      Normalize();
+      dNdxIntegral = dNdx();
+      ProduceEffDist();
+      avgthetac = AverageThetaC(beta,Eff_Dist,Lambdas);
+      cout << "avgthetac is " << avgthetac << endl;
+      AlphaEM = 1/137.035999;
+      dNdxValue = 2*M_PI*AlphaEM*pow(sin(avgthetac),2)*dNdxIntegral; // number of photons produced AND measured per unit length
+      // cout << "dNdxValue is " << dNdxValue<<endl;
+      Npe = dNdxValue*L*10000000; // large number is there to convert from nm to cm;
+      Npe = Npe*.7;
+      cout << "Npe = " << Npe << endl;
+      
+      // RNG for Monte Carlo
+      seed = std::chrono::system_clock::now().time_since_epoch().count();
+      std::default_random_engine PoisGen (seed);
+      std::poisson_distribution<int> Poisson(Npe);
+      seed = std::chrono::system_clock::now().time_since_epoch().count();
+      std::default_random_engine PoisGen2 (seed);
+      std::poisson_distribution<int> PoissonStray(MeanStrayPhotons);
+      TRandom3 Randy;
+      seed = std::chrono::system_clock::now().time_since_epoch().count(); //Set a seed for the RNG so new numbers generated each time 
+      std::default_random_engine LambdaGen2 (seed);  // Initialize RNG
+      std::discrete_distribution<int> LambdaDist2(Eff_Dist.begin(), Eff_Dist.end()); // returns an integer number with probabilities defined by the Eff_Dist vector, used in finding avgthetac and in MCs
+      //
+      
+     
+      double alpha = 0;
+      for (int i=1; i<=ThetaCvsAlpha->GetNbinsX(); i++)
+	{
+	  alpha = ThetaCvsAlpha->GetXaxis()->GetBinCenter(i);
+	  meanThC = 0;
+	  sigmaThC = 0;
+	  avgphotons = 0;
+	  cout << "Running Alpha Monte Carlo for " << PIDname[k] << " at p = " << p << " and " << "alpha = " << alpha << " rad" << endl;
+	  //cout << "alpha = "<< alpha << endl;
+	  for (int j = 0; j<NAlphaMC; j++)
+	    {
+	      
+	      int photons = Poisson(PoisGen);
+	      avgphotons += photons;
+	      // cout << "N photons" << photons << endl;
+	      double sum = 0;
+	      double sumsigma = 0;
+	      for (int f=0; f<photons; f++)
+		{
+		  int WLindex = LambdaDist2(LambdaGen2);
+		  double WL = Lambdas[WLindex];
+		  double ThetaC = acos(1/((n->n(WL))*beta));
+		  double ringphi = 2*TMath::Pi()*Randy.Rndm();
+		  double ThCreco = acos(sin(alpha)*sin(ThetaC)*cos(ringphi) + cos(alpha)*cos(ThetaC));
+		  double ThCsmeared,TotalSmear;
+		  ThCsmeared = ThCreco;
+		  ThCsmeared = smears[3]->smr(ThCreco,WL,p,B,r_in,r_out,ringphi,rapidity);
+		  // for(i=0;i<smears.size();i++)
+		  //  {
+		  //  ThCsmeared = (smears[i]->smr(ThCsmeared,WL));
+		  //    return;
+		  // }
+		  // cout << "thetac smeared is " << ThCsmeared << endl;
+		  sum += ThCsmeared;
+		  sumsigma += pow(abs(avgthetac - ThCsmeared),2);
+		  //cout << sumsigma << endl;
+		  
+		}
+	      if (photons > 0)
+		{
+		  sumstraythetas=0;
+		  sumstraysigmas=0;
+		  NStrayPhotons=0;
+		  if(do_stray_photons)
+		    {
+		      
+		      int j=0;
+		      NStrayPhotons = PoissonStray(PoisGen2);
+		      while(j<NStrayPhotons)
+			{
+			  double strayX = 1.5*Randy.Rndm()*avgthetac;
+			  double strayY = 1.5*Randy.Rndm()*avgthetac;
+			  double strayTheta = sqrt(pow(strayX,2)+pow(strayY,2))/L;
+			  sumstraythetas += strayTheta;
+			  sumstraysigmas += pow(abs(avgthetac-strayTheta),2);
+			  // cout << straythetas<< endl;
+			  j++;
+			  avgphotons++;
+			}
+		      sigmaThC += pow(sumstraysigmas/NStrayPhotons,.5);
+		    }
+		  double thetaApparent = (sum+sumstraythetas)/((double)photons+NStrayPhotons);// adding in stray photons distributed randomly
+		  sigmaThC += pow(sumsigma/photons,.5); //sum and divide by N outside photons loop to find mean sigma at a certain P
+		  meanThC += thetaApparent;
+		  // cout << meanThC << endl;		  
+		  ThetaCvsAlpha->Fill(alpha,thetaApparent);
+		}
+	    }
+	  AssignPIDAlpha(k,alpha);
+	}  
+    }
+  
+  // Extract info for plots
+  string PCName = effs[0]->EffName();
+  cout << effs[0]->EffName() << endl;
+  Sellmeier_Index SMn(lambda);
+  string GasName = SMn.Gas();
+  cout << "Radiator length is " << L << endl;
+  cout << "Gas is " << GasName << endl;
+  //
+  
+  //Fill and Plot
+  FillAlphas();
+  AlphaMCPlots();      
+  //
+}
